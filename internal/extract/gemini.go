@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -11,6 +13,11 @@ import (
 )
 
 const defaultGeminiModel = "gemini-flash-latest"
+
+// requestTimeout bounds a single HTTP attempt to Gemini. Left unset, the SDK
+// defaults to &http.Client{} (zero Timeout), so a single stalled connection
+// blocks that comment's extraction — and its concurrency slot — forever.
+const requestTimeout = 60 * time.Second
 
 const extractionPrompt = `You are extracting structured data from a single comment posted in a Hacker News "Who is hiring?" thread. Each such comment is one job posting from a hiring company.
 
@@ -40,8 +47,9 @@ func newGeminiExtractor(apiKey string) (*GeminiExtractor, error) {
 
 func newGeminiExtractorWithOptions(apiKey, baseURL, model string) (*GeminiExtractor, error) {
 	client, err := genai.NewClient(context.Background(), &genai.ClientConfig{
-		APIKey:  apiKey,
-		Backend: genai.BackendGeminiAPI,
+		APIKey:     apiKey,
+		Backend:    genai.BackendGeminiAPI,
+		HTTPClient: &http.Client{Timeout: requestTimeout},
 		HTTPOptions: genai.HTTPOptions{
 			BaseURL: baseURL,
 			// A nil RetryOptions means zero retries in this SDK. An empty
@@ -95,6 +103,12 @@ func (e *GeminiExtractor) ExtractJob(ctx context.Context, commentText string) (j
 	resp, err := e.client.Models.GenerateContent(ctx, e.model, contents, &genai.GenerateContentConfig{
 		ResponseMIMEType: "application/json",
 		ResponseSchema:   jobPostingSchema,
+		// This is a straightforward field-extraction task, not one needing
+		// reasoning. Without this, gemini-flash-latest (currently aliasing to
+		// a thinking model) spends hundreds of hidden "thinking" tokens per
+		// comment, multiplying latency and cost across a thread's comments
+		// for no gain in extraction quality.
+		ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))},
 	})
 	if err != nil {
 		return job.JobPosting{}, fmt.Errorf("gemini generate content: %w", err)

@@ -12,6 +12,22 @@ import (
 	"github.com/gusdecool/hacker-news-who-ishiring-scrapper/internal/job"
 )
 
+// progress serializes stderr writes from concurrent extraction workers so
+// progress lines don't interleave, and tracks how many comments are done.
+type progress struct {
+	mu     sync.Mutex
+	done   int
+	total  int
+	stderr io.Writer
+}
+
+func (p *progress) reportDone(commentID int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.done++
+	fmt.Fprintf(p.stderr, "[%d/%d] processed comment %d\n", p.done, p.total, commentID)
+}
+
 // Config holds the run's non-credential settings. API keys are resolved
 // into a JobExtractor by the caller before Run is invoked.
 type Config struct {
@@ -51,11 +67,11 @@ func Run(ctx context.Context, cfg Config, deps Deps, stderr io.Writer) (Summary,
 	if err != nil {
 		return Summary{}, fmt.Errorf("fetching thread: %w", err)
 	}
+	fmt.Fprintf(stderr, "fetched thread: %d comments\n", len(comments))
 
-	concurrency := cfg.Concurrency
-	if concurrency < 1 {
-		concurrency = 1
-	}
+	concurrency := max(cfg.Concurrency, 1)
+
+	prog := &progress{total: len(comments), stderr: stderr}
 
 	type result struct {
 		posting job.JobPosting
@@ -73,6 +89,8 @@ func Run(ctx context.Context, cfg Config, deps Deps, stderr io.Writer) (Summary,
 		go func(i int, c hn.Comment) {
 			defer wg.Done()
 			defer func() { <-sem }()
+
+			defer prog.reportDone(c.ID)
 
 			posting, err := deps.Extractor.ExtractJob(ctx, c.Text)
 			if err != nil {

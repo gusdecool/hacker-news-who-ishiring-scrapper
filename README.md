@@ -7,7 +7,7 @@ into a structured, salary-normalized CSV file, using Gemini for extraction.
 
 ```bash
 export GEMINI_API_KEY=your-gemini-api-key
-go run ./cmd/hnwih --url https://news.ycombinator.com/item?id=49522897 --out jobs.csv
+go run ./cmd/hnwih --url "https://news.ycombinator.com/item?id=49522897" --out jobs.csv
 ```
 
 Or pass the numeric thread ID directly: `--url 49522897`.

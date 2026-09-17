@@ -98,6 +98,40 @@ func TestRun_WritesCSVForAllExtractedJobs(t *testing.T) {
 	}
 }
 
+func TestRun_ReportsProgressAsCommentsAreProcessed(t *testing.T) {
+	comments := []hn.Comment{
+		{ID: 1, Text: "Company A"},
+		{ID: 2, Text: "Company B"},
+		{ID: 3, Text: "Company C"},
+	}
+	results := map[string]job.JobPosting{
+		"Company A": {Location: "Remote", JobTitle: "Engineer A"},
+		"Company B": {Location: "Remote", JobTitle: "Engineer B"},
+		"Company C": {Location: "Remote", JobTitle: "Engineer C"},
+	}
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "jobs.csv")
+	var stderr bytes.Buffer
+
+	_, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, Concurrency: 2}, Deps{
+		HN:        &fakeHNClient{comments: comments},
+		Extractor: &fakeExtractor{results: results, failTexts: map[string]bool{}},
+		Converter: fakeConverter{},
+	}, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	out := stderr.String()
+	if !strings.Contains(out, "fetched thread: 3 comments") {
+		t.Errorf("expected a message reporting the fetched comment count, got: %s", out)
+	}
+	if !strings.Contains(out, "[3/3]") {
+		t.Errorf("expected a final progress line showing all 3 comments done, got: %s", out)
+	}
+}
+
 func TestRun_SkipsFailedExtractionsButWritesTheRest(t *testing.T) {
 	comments := []hn.Comment{
 		{ID: 1, Text: "Good Comment"},
