@@ -82,17 +82,29 @@ requesting structured output via a JSON response schema matching
 `JobPosting`'s extractable fields (see Schema below) so no manual
 JSON-parsing/retry logic is needed.
 
-Provider selection is config-driven through a small registry:
+There's no `--llm-provider` flag — the provider is inferred from which
+provider-specific API key is configured. Each registered provider declares
+the flag/env var that identifies it:
 
 ```go
-var extractors = map[string]func(cfg Config) (JobExtractor, error){
-    "gemini": newGeminiExtractor,
+type providerConfig struct {
+    name     string
+    detect   func(cfg Config) bool // true if this provider's key is set
+    build    func(cfg Config) (JobExtractor, error)
+}
+
+var extractors = []providerConfig{
+    {name: "gemini", detect: func(c Config) bool { return c.GeminiAPIKey != "" }, build: newGeminiExtractor},
 }
 ```
 
-`--llm-provider` (default `gemini`) selects the entry. Adding a second
-provider later means one new file implementing `JobExtractor` plus one map
-entry — no interface changes.
+At startup the CLI scans `extractors` for entries whose `detect` returns
+true: exactly one match resolves the provider; zero matches is a fatal
+config error ("no LLM provider configured, set --gemini-api-key or
+GEMINI_API_KEY"); more than one match is also a fatal config error asking
+the user to unset all but one key, to avoid silently picking one. Adding a
+second provider later means one new file implementing `JobExtractor` plus
+one new entry in `extractors` — no interface changes.
 
 ### `internal/fx`
 
@@ -184,9 +196,14 @@ value is missing.
 |---|---|---|---|
 | `--url` | — | yes | — |
 | `--out` | — | no | `jobs.csv` |
-| `--llm-provider` | — | no | `gemini` |
-| `--gemini-api-key` | `GEMINI_API_KEY` | yes (if provider=gemini) | — |
+| `--gemini-api-key` | `GEMINI_API_KEY` | yes — selects the `gemini` provider | — |
 | `--concurrency` | — | no | `5` |
+
+Exactly one provider's API key must be set (currently only
+`--gemini-api-key`/`GEMINI_API_KEY`); it both authenticates and selects
+the provider. Adding a second provider later adds its own
+`--<provider>-api-key`/env var pair to this table, not a separate
+selector flag.
 
 ## Testing
 
