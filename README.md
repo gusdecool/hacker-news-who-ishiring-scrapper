@@ -5,6 +5,8 @@ into a structured, salary-normalized CSV file, using Gemini for extraction.
 
 The output later can be manually processed in spreadsheet (google sheets) or any tools of your choice to do deep filtering.
 
+Sample output is in [jobs.csv](sample/jobs.csv)
+
 ## Usage
 
 ```bash
@@ -14,7 +16,7 @@ go run ./cmd/hnwih --url "https://news.ycombinator.com/item?id=49522897" --out j
 
 Or pass the numeric thread ID directly: `--url 49522897`.
 
-Sample output is in [jobs.csv](sample/jobs.csv)
+The process usually tooks 5 minutes.
 
 ## Flags
 
