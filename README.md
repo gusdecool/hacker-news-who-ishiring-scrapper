@@ -3,6 +3,8 @@
 A CLI that scrapes an "Ask HN: Who is hiring?" thread's top-level comments
 into a structured, salary-normalized CSV file, using Gemini for extraction.
 
+The output later can be manually processed in spreadsheet (google sheets) or any tools of your choice to do deep filtering.
+
 ## Usage
 
 ```bash
@@ -12,6 +14,8 @@ go run ./cmd/hnwih --url "https://news.ycombinator.com/item?id=49522897" --out j
 
 Or pass the numeric thread ID directly: `--url 49522897`.
 
+Sample output is in [jobs.csv](sample/jobs.csv)
+
 ## Flags
 
 | Flag | Env var | Required | Default |
@@ -19,7 +23,7 @@ Or pass the numeric thread ID directly: `--url 49522897`.
 | `--url` | — | yes | — |
 | `--out` | — | no | `jobs.csv` |
 | `--gemini-api-key` | `GEMINI_API_KEY` | yes (selects the Gemini provider) | — |
-| `--concurrency` | — | no | `5` |
+| `--batch-concurrency` | — | no | `5` |
 
 ## Output
 

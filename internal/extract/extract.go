@@ -8,10 +8,30 @@ import (
 	"github.com/gusdecool/hacker-news-who-ishiring-scrapper/internal/job"
 )
 
-// JobExtractor turns a single HN comment's raw text into a structured job
-// posting.
+// CommentInput is one comment to extract a job posting from. ID is echoed
+// back in JobResult so batched results can be matched to their comment
+// regardless of the order an LLM returns them in.
+type CommentInput struct {
+	ID   int
+	Text string
+}
+
+// JobResult is one comment's extraction outcome within a batch. Err is set
+// (with Posting left zero) when only this comment's extraction failed —
+// e.g. it was missing from the model's response — without that failing the
+// rest of the batch.
+type JobResult struct {
+	CommentID int
+	Posting   job.JobPosting
+	Err       error
+}
+
+// JobExtractor turns a batch of HN comments' raw text into structured job
+// postings. A non-nil returned error means the whole batch failed (e.g. the
+// request itself errored); a nil error with per-item Err set means only
+// those comments failed.
 type JobExtractor interface {
-	ExtractJob(ctx context.Context, commentText string) (job.JobPosting, error)
+	ExtractJobs(ctx context.Context, comments []CommentInput) ([]JobResult, error)
 }
 
 // Config holds every provider's credentials. A provider is selected by

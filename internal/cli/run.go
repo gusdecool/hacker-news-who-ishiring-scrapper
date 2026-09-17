@@ -28,12 +28,18 @@ func (p *progress) reportDone(commentID int) {
 	fmt.Fprintf(p.stderr, "[%d/%d] processed comment %d\n", p.done, p.total, commentID)
 }
 
+// batchSize is how many comments are sent to the extractor in a single
+// call. Fixed rather than configurable: it only trades off prompt size
+// against blast radius on a batch-level failure, not something worth
+// exposing as a flag.
+const batchSize = 20
+
 // Config holds the run's non-credential settings. API keys are resolved
 // into a JobExtractor by the caller before Run is invoked.
 type Config struct {
-	ThreadURL   string
-	OutPath     string
-	Concurrency int
+	ThreadURL        string
+	OutPath          string
+	BatchConcurrency int
 }
 
 // Deps wires the collaborators Run needs. Tests supply fakes for all three.
@@ -47,6 +53,17 @@ type Deps struct {
 type Summary struct {
 	Written int
 	Skipped int
+}
+
+// chunkComments splits comments into contiguous groups of at most size,
+// preserving order — the batch results returned for each group line up
+// index-for-index with comments[i*size:], so offsets stay simple.
+func chunkComments(comments []hn.Comment, size int) [][]hn.Comment {
+	var chunks [][]hn.Comment
+	for i := 0; i < len(comments); i += size {
+		chunks = append(chunks, comments[i:min(i+size, len(comments))])
+	}
+	return chunks
 }
 
 // Run fetches the thread, extracts a JobPosting per top-level comment,
@@ -69,7 +86,7 @@ func Run(ctx context.Context, cfg Config, deps Deps, stderr io.Writer) (Summary,
 	}
 	fmt.Fprintf(stderr, "fetched thread: %d comments\n", len(comments))
 
-	concurrency := max(cfg.Concurrency, 1)
+	concurrency := max(cfg.BatchConcurrency, 1)
 
 	prog := &progress{total: len(comments), stderr: stderr}
 
@@ -80,37 +97,54 @@ func Run(ctx context.Context, cfg Config, deps Deps, stderr io.Writer) (Summary,
 	}
 
 	results := make([]result, len(comments))
+	batches := chunkComments(comments, batchSize)
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
-	for i, c := range comments {
+	for bi, batch := range batches {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(i int, c hn.Comment) {
+		go func(offset int, batch []hn.Comment) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			defer prog.reportDone(c.ID)
+			inputs := make([]extract.CommentInput, len(batch))
+			for j, c := range batch {
+				inputs[j] = extract.CommentInput{ID: c.ID, Text: c.Text}
+			}
 
-			posting, err := deps.Extractor.ExtractJob(ctx, c.Text)
+			batchResults, err := deps.Extractor.ExtractJobs(ctx, inputs)
 			if err != nil {
-				results[i] = result{err: fmt.Errorf("comment %d: %w", c.ID, err)}
+				for j, c := range batch {
+					results[offset+j] = result{err: fmt.Errorf("comment %d: %w", c.ID, err)}
+					prog.reportDone(c.ID)
+				}
 				return
 			}
 
-			var warning string
-			if posting.HasSalary {
-				usd, convErr := deps.Converter.ToUSD(ctx, (posting.SalaryMinAmount+posting.SalaryMaxAmount)/2, posting.SalaryCurrencyCode)
-				if convErr != nil {
-					warning = fmt.Sprintf("could not normalize salary to USD: %v", convErr)
-				} else {
-					posting.SalaryNormalizedUSD = usd
-					posting.HasNormalizedUSD = true
+			for j, r := range batchResults {
+				if r.Err != nil {
+					results[offset+j] = result{err: r.Err}
+					prog.reportDone(r.CommentID)
+					continue
 				}
-			}
 
-			results[i] = result{posting: posting, warning: warning}
-		}(i, c)
+				posting := r.Posting
+				var warning string
+				if posting.HasSalary {
+					usd, convErr := deps.Converter.ToUSD(ctx, (posting.SalaryMinAmount+posting.SalaryMaxAmount)/2, posting.SalaryCurrencyCode)
+					if convErr != nil {
+						warning = fmt.Sprintf("could not normalize salary to USD: %v", convErr)
+					} else {
+						posting.SalaryNormalizedUSD = usd
+						posting.HasNormalizedUSD = true
+					}
+				}
+
+				results[offset+j] = result{posting: posting, warning: warning}
+				prog.reportDone(r.CommentID)
+			}
+		}(bi*batchSize, batch)
 	}
 	wg.Wait()
 

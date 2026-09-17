@@ -17,7 +17,7 @@ import (
 
 func main() {
 	var urlFlag, outFlag, geminiAPIKeyFlag string
-	var concurrency int
+	var batchConcurrency int
 
 	rootCmd := &cobra.Command{
 		Use:   "hnwih",
@@ -49,9 +49,9 @@ func main() {
 			}
 
 			_, err = cli.Run(ctx, cli.Config{
-				ThreadURL:   urlFlag,
-				OutPath:     outFlag,
-				Concurrency: concurrency,
+				ThreadURL:        urlFlag,
+				OutPath:          outFlag,
+				BatchConcurrency: batchConcurrency,
 			}, cli.Deps{
 				HN:        hnClient,
 				Extractor: extractor,
@@ -64,7 +64,7 @@ func main() {
 	rootCmd.Flags().StringVar(&urlFlag, "url", "", "HN thread URL or numeric ID (required)")
 	rootCmd.Flags().StringVar(&outFlag, "out", "jobs.csv", "output CSV path")
 	rootCmd.Flags().StringVar(&geminiAPIKeyFlag, "gemini-api-key", "", "Gemini API key (or set GEMINI_API_KEY)")
-	rootCmd.Flags().IntVar(&concurrency, "concurrency", 5, "number of comments processed concurrently")
+	rootCmd.Flags().IntVar(&batchConcurrency, "batch-concurrency", 5, "number of 20-comment extraction batches processed concurrently")
 	_ = rootCmd.MarkFlagRequired("url")
 
 	if err := rootCmd.Execute(); err != nil {

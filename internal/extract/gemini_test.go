@@ -11,56 +11,90 @@ import (
 	"testing"
 )
 
-func TestGeminiExtractor_ExtractJob(t *testing.T) {
-	var capturedBody string
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		capturedBody = string(body)
-
-		responseJSON := `{
-			"location": "Remote (Europe)",
-			"job_title": "Senior Product Engineer",
-			"description": "Modash helps brands find creators.",
-			"how_to_apply": "https://modash.io",
-			"has_salary": true,
-			"salary_actual": "€75k-110k",
-			"salary_min_amount": 75000,
-			"salary_max_amount": 110000,
-			"salary_currency_code": "EUR"
-		}`
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"candidates": []map[string]any{
-				{
-					"content": map[string]any{
-						"role": "model",
-						"parts": []map[string]any{
-							{"text": responseJSON},
-						},
-					},
-				},
-			},
-		})
-	}))
-	defer server.Close()
+func newFakeGeminiServer(t *testing.T, handler http.HandlerFunc) *GeminiExtractor {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
 
 	extractor, err := newGeminiExtractorWithOptions("test-key", server.URL, "test-model")
 	if err != nil {
 		t.Fatalf("newGeminiExtractorWithOptions returned error: %v", err)
 	}
+	return extractor
+}
 
-	got, err := extractor.ExtractJob(context.Background(), "Modash.io | Senior Product Engineer | Remote (Europe)")
+func jsonCandidateResponse(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"candidates": []map[string]any{
+			{
+				"content": map[string]any{
+					"role": "model",
+					"parts": []map[string]any{
+						{"text": text},
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestGeminiExtractor_ExtractJobs(t *testing.T) {
+	var capturedBody string
+
+	extractor := newFakeGeminiServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		capturedBody = string(body)
+
+		responseJSON := `[
+			{
+				"comment_id": 1,
+				"location": "Remote (Europe)",
+				"job_title": "Senior Product Engineer",
+				"description": "Modash helps brands find creators.",
+				"how_to_apply": "https://modash.io",
+				"has_salary": true,
+				"salary_actual": "€75k-110k",
+				"salary_min_amount": 75000,
+				"salary_max_amount": 110000,
+				"salary_currency_code": "EUR"
+			},
+			{
+				"comment_id": 2,
+				"location": "On-site NYC",
+				"job_title": "Backend Engineer",
+				"description": "Acme is hiring.",
+				"how_to_apply": "jobs@acme.com",
+				"has_salary": false,
+				"salary_actual": "",
+				"salary_min_amount": 0,
+				"salary_max_amount": 0,
+				"salary_currency_code": ""
+			}
+		]`
+		jsonCandidateResponse(w, responseJSON)
+	})
+
+	got, err := extractor.ExtractJobs(context.Background(), []CommentInput{
+		{ID: 1, Text: "Modash.io | Senior Product Engineer | Remote (Europe)"},
+		{ID: 2, Text: "Acme | Backend Engineer | On-site NYC"},
+	})
 	if err != nil {
-		t.Fatalf("ExtractJob returned error: %v", err)
+		t.Fatalf("ExtractJobs returned error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(got))
 	}
 
-	if got.JobTitle != "Senior Product Engineer" || got.Location != "Remote (Europe)" {
-		t.Errorf("unexpected extraction result: %+v", got)
+	if got[0].CommentID != 1 || got[0].Err != nil || got[0].Posting.JobTitle != "Senior Product Engineer" {
+		t.Errorf("unexpected result[0]: %+v", got[0])
 	}
-	if !got.HasSalary || got.SalaryMinAmount != 75000 || got.SalaryMaxAmount != 110000 || got.SalaryCurrencyCode != "EUR" {
-		t.Errorf("unexpected salary fields: %+v", got)
+	if !got[0].Posting.HasSalary || got[0].Posting.SalaryMinAmount != 75000 || got[0].Posting.SalaryMaxAmount != 110000 || got[0].Posting.SalaryCurrencyCode != "EUR" {
+		t.Errorf("unexpected salary fields: %+v", got[0].Posting)
+	}
+
+	if got[1].CommentID != 2 || got[1].Err != nil || got[1].Posting.JobTitle != "Backend Engineer" {
+		t.Errorf("unexpected result[1]: %+v", got[1])
 	}
 
 	if !strings.Contains(capturedBody, `"responseMimeType":"application/json"`) {
@@ -71,13 +105,53 @@ func TestGeminiExtractor_ExtractJob(t *testing.T) {
 	}
 }
 
+// TestGeminiExtractor_MissingCommentGetsPerItemError proves that a comment
+// absent from the model's response fails only that comment, not the batch.
+func TestGeminiExtractor_MissingCommentGetsPerItemError(t *testing.T) {
+	extractor := newFakeGeminiServer(t, func(w http.ResponseWriter, r *http.Request) {
+		responseJSON := `[
+			{
+				"comment_id": 1,
+				"location": "Remote",
+				"job_title": "Engineer",
+				"description": "desc",
+				"how_to_apply": "apply@x.com",
+				"has_salary": false,
+				"salary_actual": "",
+				"salary_min_amount": 0,
+				"salary_max_amount": 0,
+				"salary_currency_code": ""
+			}
+		]`
+		jsonCandidateResponse(w, responseJSON)
+	})
+
+	got, err := extractor.ExtractJobs(context.Background(), []CommentInput{
+		{ID: 1, Text: "Company A"},
+		{ID: 2, Text: "Company B"},
+	})
+	if err != nil {
+		t.Fatalf("ExtractJobs returned error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(got))
+	}
+
+	if got[0].Err != nil {
+		t.Errorf("expected comment 1 to succeed, got err: %v", got[0].Err)
+	}
+	if got[1].Err == nil {
+		t.Error("expected comment 2 (missing from response) to have a per-item error")
+	}
+}
+
 // TestGeminiExtractor_RetriesOnTransientFailure proves the client is
 // configured to retry: the server returns 429 on the first request and a
-// valid response on the second, and ExtractJob must still succeed.
+// valid response on the second, and ExtractJobs must still succeed.
 func TestGeminiExtractor_RetriesOnTransientFailure(t *testing.T) {
 	var requestCount int32
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	extractor := newFakeGeminiServer(t, func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&requestCount, 1)
 		if n == 1 {
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -85,44 +159,30 @@ func TestGeminiExtractor_RetriesOnTransientFailure(t *testing.T) {
 			return
 		}
 
-		responseJSON := `{
-			"location": "Remote (Europe)",
-			"job_title": "Senior Product Engineer",
-			"description": "Modash helps brands find creators.",
-			"how_to_apply": "https://modash.io",
-			"has_salary": true,
-			"salary_actual": "€75k-110k",
-			"salary_min_amount": 75000,
-			"salary_max_amount": 110000,
-			"salary_currency_code": "EUR"
-		}`
+		responseJSON := `[
+			{
+				"comment_id": 1,
+				"location": "Remote (Europe)",
+				"job_title": "Senior Product Engineer",
+				"description": "Modash helps brands find creators.",
+				"how_to_apply": "https://modash.io",
+				"has_salary": true,
+				"salary_actual": "€75k-110k",
+				"salary_min_amount": 75000,
+				"salary_max_amount": 110000,
+				"salary_currency_code": "EUR"
+			}
+		]`
+		jsonCandidateResponse(w, responseJSON)
+	})
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"candidates": []map[string]any{
-				{
-					"content": map[string]any{
-						"role": "model",
-						"parts": []map[string]any{
-							{"text": responseJSON},
-						},
-					},
-				},
-			},
-		})
-	}))
-	defer server.Close()
-
-	extractor, err := newGeminiExtractorWithOptions("test-key", server.URL, "test-model")
+	got, err := extractor.ExtractJobs(context.Background(), []CommentInput{
+		{ID: 1, Text: "Modash.io | Senior Product Engineer | Remote (Europe)"},
+	})
 	if err != nil {
-		t.Fatalf("newGeminiExtractorWithOptions returned error: %v", err)
+		t.Fatalf("ExtractJobs returned error: %v", err)
 	}
-
-	got, err := extractor.ExtractJob(context.Background(), "Modash.io | Senior Product Engineer | Remote (Europe)")
-	if err != nil {
-		t.Fatalf("ExtractJob returned error: %v", err)
-	}
-	if got.JobTitle != "Senior Product Engineer" {
+	if len(got) != 1 || got[0].Posting.JobTitle != "Senior Product Engineer" {
 		t.Errorf("unexpected extraction result: %+v", got)
 	}
 

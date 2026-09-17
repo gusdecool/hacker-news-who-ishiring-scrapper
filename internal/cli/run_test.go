@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/gusdecool/hacker-news-who-ishiring-scrapper/internal/extract"
 	"github.com/gusdecool/hacker-news-who-ishiring-scrapper/internal/hn"
 	"github.com/gusdecool/hacker-news-who-ishiring-scrapper/internal/job"
 )
@@ -31,17 +36,46 @@ func (f *fakeHNClientFunc) FetchThread(ctx context.Context, threadID string) ([]
 }
 
 // fakeExtractor maps a comment's raw text to a canned JobPosting, or to a
-// simulated failure if the text is listed in failTexts.
+// simulated per-comment failure if the text is listed in failTexts. If
+// batchErr is set, every call to ExtractJobs fails at the batch level
+// instead; if failBatchContaining is set, only the batch containing that
+// comment ID fails at the batch level, so isolation from other batches can
+// be verified. Every call's batch size is recorded in batchSizes.
 type fakeExtractor struct {
-	results   map[string]job.JobPosting
-	failTexts map[string]bool
+	results             map[string]job.JobPosting
+	failTexts           map[string]bool
+	batchErr            error
+	failBatchContaining int
+
+	mu         sync.Mutex
+	batchSizes []int
 }
 
-func (f *fakeExtractor) ExtractJob(ctx context.Context, commentText string) (job.JobPosting, error) {
-	if f.failTexts[commentText] {
-		return job.JobPosting{}, errors.New("simulated extraction failure")
+func (f *fakeExtractor) ExtractJobs(ctx context.Context, comments []extract.CommentInput) ([]extract.JobResult, error) {
+	f.mu.Lock()
+	f.batchSizes = append(f.batchSizes, len(comments))
+	f.mu.Unlock()
+
+	if f.batchErr != nil {
+		return nil, f.batchErr
 	}
-	return f.results[commentText], nil
+	if f.failBatchContaining != 0 {
+		for _, c := range comments {
+			if c.ID == f.failBatchContaining {
+				return nil, errors.New("simulated batch-level failure")
+			}
+		}
+	}
+
+	results := make([]extract.JobResult, len(comments))
+	for i, c := range comments {
+		if f.failTexts[c.Text] {
+			results[i] = extract.JobResult{CommentID: c.ID, Err: fmt.Errorf("comment %d: simulated extraction failure", c.ID)}
+			continue
+		}
+		results[i] = extract.JobResult{CommentID: c.ID, Posting: f.results[c.Text]}
+	}
+	return results, nil
 }
 
 type fakeConverter struct{}
@@ -73,7 +107,7 @@ func TestRun_WritesCSVForAllExtractedJobs(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "jobs.csv")
 
-	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, Concurrency: 2}, Deps{
+	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, BatchConcurrency: 2}, Deps{
 		HN:        &fakeHNClient{comments: comments},
 		Extractor: &fakeExtractor{results: results, failTexts: map[string]bool{}},
 		Converter: fakeConverter{},
@@ -114,7 +148,7 @@ func TestRun_ReportsProgressAsCommentsAreProcessed(t *testing.T) {
 	outPath := filepath.Join(dir, "jobs.csv")
 	var stderr bytes.Buffer
 
-	_, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, Concurrency: 2}, Deps{
+	_, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, BatchConcurrency: 2}, Deps{
 		HN:        &fakeHNClient{comments: comments},
 		Extractor: &fakeExtractor{results: results, failTexts: map[string]bool{}},
 		Converter: fakeConverter{},
@@ -145,7 +179,7 @@ func TestRun_SkipsFailedExtractionsButWritesTheRest(t *testing.T) {
 	outPath := filepath.Join(dir, "jobs.csv")
 	var stderr bytes.Buffer
 
-	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, Concurrency: 2}, Deps{
+	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, BatchConcurrency: 2}, Deps{
 		HN:        &fakeHNClient{comments: comments},
 		Extractor: &fakeExtractor{results: results, failTexts: map[string]bool{"Bad Comment": true}},
 		Converter: fakeConverter{},
@@ -168,7 +202,7 @@ func TestRun_ReturnsErrorWhenAllExtractionsFail(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "jobs.csv")
 
-	_, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, Concurrency: 1}, Deps{
+	_, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, BatchConcurrency: 1}, Deps{
 		HN:        &fakeHNClient{comments: comments},
 		Extractor: &fakeExtractor{results: map[string]job.JobPosting{}, failTexts: map[string]bool{"Bad Comment": true}},
 		Converter: fakeConverter{},
@@ -182,7 +216,7 @@ func TestRun_FetchThreadFailureIsFatal(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "jobs.csv")
 
-	_, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, Concurrency: 1}, Deps{
+	_, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, BatchConcurrency: 1}, Deps{
 		HN:        &fakeHNClient{err: errors.New("network down")},
 		Extractor: &fakeExtractor{},
 		Converter: fakeConverter{},
@@ -236,7 +270,7 @@ func TestRun_FXFailureLeavesNormalizedUSDEmpty(t *testing.T) {
 	outPath := filepath.Join(dir, "jobs.csv")
 	var stderr bytes.Buffer
 
-	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, Concurrency: 2}, Deps{
+	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, BatchConcurrency: 2}, Deps{
 		HN:        &fakeHNClient{comments: comments},
 		Extractor: &fakeExtractor{results: results, failTexts: map[string]bool{}},
 		Converter: failingConverter{err: errors.New("FX rates unavailable: fetch failed")},
@@ -284,7 +318,7 @@ func TestRun_FXWarningIsDeduplicatedAcrossComments(t *testing.T) {
 	var stderr bytes.Buffer
 
 	sameErr := errors.New("FX rates unavailable: fetch failed")
-	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, Concurrency: 3}, Deps{
+	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, BatchConcurrency: 3}, Deps{
 		HN:        &fakeHNClient{comments: comments},
 		Extractor: &fakeExtractor{results: results, failTexts: map[string]bool{}},
 		Converter: failingConverter{err: sameErr},
@@ -300,5 +334,69 @@ func TestRun_FXWarningIsDeduplicatedAcrossComments(t *testing.T) {
 	count := strings.Count(stderr.String(), warningText)
 	if count != 1 {
 		t.Errorf("expected the FX warning to appear exactly once, got %d times in stderr: %s", count, stderr.String())
+	}
+}
+
+func TestRun_SplitsCommentsIntoBatchesOf20(t *testing.T) {
+	comments := make([]hn.Comment, 25)
+	results := make(map[string]job.JobPosting, 25)
+	for i := range comments {
+		id := i + 1
+		text := fmt.Sprintf("Company %d", id)
+		comments[i] = hn.Comment{ID: id, Text: text}
+		results[text] = job.JobPosting{Location: "Remote", JobTitle: fmt.Sprintf("Engineer %d", id)}
+	}
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "jobs.csv")
+	extractor := &fakeExtractor{results: results, failTexts: map[string]bool{}}
+
+	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, BatchConcurrency: 2}, Deps{
+		HN:        &fakeHNClient{comments: comments},
+		Extractor: extractor,
+		Converter: fakeConverter{},
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if summary.Written != 25 || summary.Skipped != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	extractor.mu.Lock()
+	sizes := append([]int(nil), extractor.batchSizes...)
+	extractor.mu.Unlock()
+	sort.Ints(sizes)
+	if !slices.Equal(sizes, []int{5, 20}) {
+		t.Errorf("expected batches of 20 and 5 comments, got: %v", sizes)
+	}
+}
+
+func TestRun_BatchLevelFailureSkipsOnlyThatBatchsComments(t *testing.T) {
+	comments := make([]hn.Comment, 25)
+	results := make(map[string]job.JobPosting, 25)
+	for i := range comments {
+		id := i + 1
+		text := fmt.Sprintf("Company %d", id)
+		comments[i] = hn.Comment{ID: id, Text: text}
+		results[text] = job.JobPosting{Location: "Remote", JobTitle: fmt.Sprintf("Engineer %d", id)}
+	}
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "jobs.csv")
+	var stderr bytes.Buffer
+
+	// Comment 25 falls in the second batch (comments 21-25); only that
+	// batch's 5 comments should be skipped.
+	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, BatchConcurrency: 2}, Deps{
+		HN:        &fakeHNClient{comments: comments},
+		Extractor: &fakeExtractor{results: results, failTexts: map[string]bool{}, failBatchContaining: 25},
+		Converter: fakeConverter{},
+	}, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if summary.Written != 20 || summary.Skipped != 5 {
+		t.Fatalf("unexpected summary: %+v", summary)
 	}
 }
