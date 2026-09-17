@@ -33,6 +33,12 @@ func main() {
 				return err
 			}
 
+			// Validate --url before any network calls (FetchRates below is a
+			// real HTTP call). Config errors must be fatal at startup.
+			if _, err := hn.ParseThreadID(urlFlag); err != nil {
+				return fmt.Errorf("invalid --url: %w", err)
+			}
+
 			httpClient := &http.Client{Timeout: 30 * time.Second}
 			hnClient := hn.NewAlgoliaClient(httpClient)
 			converter := fx.NewFrankfurterConverter(httpClient)

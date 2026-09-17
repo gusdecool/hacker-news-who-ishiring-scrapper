@@ -44,6 +44,12 @@ func newGeminiExtractorWithOptions(apiKey, baseURL, model string) (*GeminiExtrac
 		Backend: genai.BackendGeminiAPI,
 		HTTPOptions: genai.HTTPOptions{
 			BaseURL: baseURL,
+			// A nil RetryOptions means zero retries in this SDK. An empty
+			// (non-nil) HTTPRetryOptions activates its documented defaults:
+			// 5 attempts, exponential backoff, retrying on 408/429/5xx and
+			// transport errors. Without this, a transient rate limit or
+			// server error silently drops that comment's extraction.
+			RetryOptions: &genai.HTTPRetryOptions{},
 		},
 	})
 	if err != nil {

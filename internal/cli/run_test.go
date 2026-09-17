@@ -50,6 +50,16 @@ func (fakeConverter) ToUSD(ctx context.Context, amount float64, currencyCode str
 	return amount * 2, nil
 }
 
+// failingConverter simulates an FX conversion that always fails, e.g.
+// because rates could not be fetched at startup.
+type failingConverter struct {
+	err error
+}
+
+func (f failingConverter) ToUSD(ctx context.Context, amount float64, currencyCode string) (float64, error) {
+	return 0, f.err
+}
+
 func TestRun_WritesCSVForAllExtractedJobs(t *testing.T) {
 	comments := []hn.Comment{
 		{ID: 1, Text: "Company A"},
@@ -170,5 +180,91 @@ func TestRun_InvalidURLIsRejectedBeforeFetching(t *testing.T) {
 	}
 	if fetchCalled {
 		t.Error("FetchThread should not be called when the URL is invalid")
+	}
+}
+
+func TestRun_FXFailureLeavesNormalizedUSDEmpty(t *testing.T) {
+	comments := []hn.Comment{
+		{ID: 1, Text: "Company A"},
+	}
+	results := map[string]job.JobPosting{
+		"Company A": {
+			Location:           "Remote",
+			JobTitle:           "Engineer A",
+			HasSalary:          true,
+			SalaryMinAmount:    100,
+			SalaryMaxAmount:    200,
+			SalaryCurrencyCode: "EUR",
+		},
+	}
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "jobs.csv")
+	var stderr bytes.Buffer
+
+	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, Concurrency: 2}, Deps{
+		HN:        &fakeHNClient{comments: comments},
+		Extractor: &fakeExtractor{results: results, failTexts: map[string]bool{}},
+		Converter: failingConverter{err: errors.New("FX rates unavailable: fetch failed")},
+	}, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if summary.Written != 1 || summary.Skipped != 0 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	content, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading output CSV: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(string(content), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected header + 1 data row, got: %q", content)
+	}
+	fields := strings.Split(lines[1], ",")
+	// location,job_title,description,how_to_apply,salary_actual,salary_min_amount,salary_max_amount,salary_currency_code,salary_normalized_usd
+	if fields[5] != "100" || fields[6] != "200" || fields[7] != "EUR" {
+		t.Errorf("expected min/max/currency to still be populated, got row: %q", lines[1])
+	}
+	if fields[8] != "" {
+		t.Errorf("expected salary_normalized_usd to be empty on FX failure, got: %q", fields[8])
+	}
+}
+
+func TestRun_FXWarningIsDeduplicatedAcrossComments(t *testing.T) {
+	comments := []hn.Comment{
+		{ID: 1, Text: "Company A"},
+		{ID: 2, Text: "Company B"},
+		{ID: 3, Text: "Company C"},
+	}
+	results := map[string]job.JobPosting{
+		"Company A": {Location: "Remote", JobTitle: "Engineer A", HasSalary: true, SalaryMinAmount: 100, SalaryMaxAmount: 200, SalaryCurrencyCode: "EUR"},
+		"Company B": {Location: "Remote", JobTitle: "Engineer B", HasSalary: true, SalaryMinAmount: 50, SalaryMaxAmount: 90, SalaryCurrencyCode: "GBP"},
+		"Company C": {Location: "Remote", JobTitle: "Engineer C", HasSalary: true, SalaryMinAmount: 10, SalaryMaxAmount: 20, SalaryCurrencyCode: "CHF"},
+	}
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "jobs.csv")
+	var stderr bytes.Buffer
+
+	sameErr := errors.New("FX rates unavailable: fetch failed")
+	summary, err := Run(context.Background(), Config{ThreadURL: "12345", OutPath: outPath, Concurrency: 3}, Deps{
+		HN:        &fakeHNClient{comments: comments},
+		Extractor: &fakeExtractor{results: results, failTexts: map[string]bool{}},
+		Converter: failingConverter{err: sameErr},
+	}, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if summary.Written != 3 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	warningText := "could not normalize salary to USD: " + sameErr.Error()
+	count := strings.Count(stderr.String(), warningText)
+	if count != 1 {
+		t.Errorf("expected the FX warning to appear exactly once, got %d times in stderr: %s", count, stderr.String())
 	}
 }

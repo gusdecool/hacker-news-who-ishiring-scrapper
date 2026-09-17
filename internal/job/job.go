@@ -18,6 +18,7 @@ type JobPosting struct {
 	SalaryCurrencyCode  string
 	SalaryNormalizedUSD float64
 	HasSalary           bool
+	HasNormalizedUSD    bool
 }
 
 var csvHeader = []string{
@@ -61,6 +62,10 @@ func (j JobPosting) row() []string {
 	if !j.HasSalary {
 		return []string{j.Location, j.JobTitle, j.Description, j.HowToApply, j.SalaryActual, "", "", "", ""}
 	}
+	normalizedUSD := ""
+	if j.HasNormalizedUSD {
+		normalizedUSD = formatFloat(j.SalaryNormalizedUSD)
+	}
 	return []string{
 		j.Location,
 		j.JobTitle,
@@ -70,7 +75,7 @@ func (j JobPosting) row() []string {
 		formatFloat(j.SalaryMinAmount),
 		formatFloat(j.SalaryMaxAmount),
 		j.SalaryCurrencyCode,
-		formatFloat(j.SalaryNormalizedUSD),
+		normalizedUSD,
 	}
 }
 

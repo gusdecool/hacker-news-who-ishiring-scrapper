@@ -60,6 +60,7 @@ func Run(ctx context.Context, cfg Config, deps Deps, stderr io.Writer) (Summary,
 	type result struct {
 		posting job.JobPosting
 		err     error
+		warning string
 	}
 
 	results := make([]result, len(comments))
@@ -79,27 +80,34 @@ func Run(ctx context.Context, cfg Config, deps Deps, stderr io.Writer) (Summary,
 				return
 			}
 
+			var warning string
 			if posting.HasSalary {
 				usd, convErr := deps.Converter.ToUSD(ctx, (posting.SalaryMinAmount+posting.SalaryMaxAmount)/2, posting.SalaryCurrencyCode)
 				if convErr != nil {
-					fmt.Fprintf(stderr, "warning: could not normalize salary for comment %d: %v\n", c.ID, convErr)
+					warning = fmt.Sprintf("could not normalize salary to USD: %v", convErr)
 				} else {
 					posting.SalaryNormalizedUSD = usd
+					posting.HasNormalizedUSD = true
 				}
 			}
 
-			results[i] = result{posting: posting}
+			results[i] = result{posting: posting, warning: warning}
 		}(i, c)
 	}
 	wg.Wait()
 
 	var jobs []job.JobPosting
 	skipped := 0
+	printedWarnings := make(map[string]bool)
 	for _, r := range results {
 		if r.err != nil {
 			fmt.Fprintf(stderr, "warning: skipping comment: %v\n", r.err)
 			skipped++
 			continue
+		}
+		if r.warning != "" && !printedWarnings[r.warning] {
+			printedWarnings[r.warning] = true
+			fmt.Fprintf(stderr, "warning: %s\n", r.warning)
 		}
 		jobs = append(jobs, r.posting)
 	}
